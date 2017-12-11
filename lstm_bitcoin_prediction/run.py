@@ -1,132 +1,83 @@
-import time
-import time
-import threading
-import lstm, etl, json
-import numpy as np
-import pandas as pd
-import h5py
+#Load libs
+import numpy as np # linear algebra
+import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+from keras.layers.core import Dense, Activation, Dropout
+from keras.layers.recurrent import LSTM
+from keras.models import Sequential
 import matplotlib.pyplot as plt
-configs = json.loads(open('configs.json').read())
-tstart = time.time()
 
-def plot_results(predicted_data, true_data):
-    fig=plt.figure(figsize=(18, 12), dpi= 80, facecolor='w', edgecolor='k')
-    ax = fig.add_subplot(111)
-    ax.plot(true_data, label='True Data')
-    plt.plot(predicted_data, label='Prediction')
-    plt.legend()
-    plt.show()
+#Lets load the daily prices
+btc = pd.read_csv('./input/bitcoin_day.csv')
+# print(btc.head())
 
-def predict_sequences_multiple(model, data, window_size, prediction_len):
-    #Predict sequence of 50 steps before shifting prediction run forward by 50 steps
-    prediction_seqs = []
-    for i in range(int(len(data)/prediction_len)):
-        curr_frame = data[i*prediction_len]
-        predicted = []
-        for j in range(prediction_len):
-            predicted.append(model.predict(curr_frame[np.newaxis,:,:])[0,0])
-            curr_frame = curr_frame[1:]
-            curr_frame = np.insert(curr_frame, [window_size-1], predicted[-1], axis=0)
-        prediction_seqs.append(predicted)
-    return prediction_seqs
+#data is in reverse order
+btc = btc.iloc[::-1]
+# print(btc.head())
 
-def plot_results_multiple(predicted_data, true_data, prediction_len):
-    fig=plt.figure(figsize=(18, 12), dpi= 80, facecolor='w', edgecolor='k')
-    ax = fig.add_subplot(111)
-    ax.plot(true_data, label='True Data')
-    #Pad the list of predictions to shift it in the graph to it's correct start
-    for i, data in enumerate(predicted_data):
-        padding = [None for p in range(i * prediction_len)]
-        plt.plot(padding + data, label='Prediction')
-        plt.legend()
-    plt.show()
-    
-true_values = []
-def generator_strip_xy(data_gen, true_values):
-    for x, y in data_gen_test:
-        true_values += list(y)
-        yield x
-    
-def fit_model_threaded(model, data_gen_train, steps_per_epoch, configs):
-    """thread worker for model fitting - so it doesn't freeze on jupyter notebook"""
-    model = lstm.build_network([ncols, 150, 150, 1])
-    model.fit_generator(
-        data_gen_train,
-        steps_per_epoch=steps_per_epoch,
-        epochs=configs['model']['epochs']
-    )
-    model.save(configs['model']['filename_model'])
-    print('> Model Trained! Weights saved in', configs['model']['filename_model'])
-    return
+#getting the 4 price-related features from the dataframe
+data = btc[["Open", "High", "Low", "Close"]].values
+print("Data shape: {}".format(data.shape))
+data_train = data[:int(data.shape[0] * 0.8), :]
+data_test = data[int(data.shape[0] * 0.8):, :]
+print('Training data shape: {}'.format(data_train.shape))
+print('Testing data shape: {}'.format(data_test.shape))
 
-dl = etl.ETL()
-dl.create_clean_datafile(
-    filename_in = configs['data']['filename'],
-    filename_out = configs['data']['filename_clean'],
-    batch_size = configs['data']['batch_size'],
-    x_window_size = configs['data']['x_window_size'],
-    y_window_size = configs['data']['y_window_size'],
-    y_col = configs['data']['y_predict_column'],
-    filter_cols = configs['data']['filter_columns'],
-    normalise = True
-)
+#we change the data to have something more generalizeable, lets say [ %variation , %high, %low]
+norm_price_variation_train = (1 - (data_train[:, 0] / data_train[:, 3])) * 100
+norm_highs_train = (data_train[:, 1] / np.maximum(data_train[:, 0], data_train[:, 3]) - 1) * 100
+norm_low_train = (data_train[:, 2] / np.minimum(data_train[:, 0], data_train[:, 3]) - 1) * 100
 
-print('> Generating clean data from:', configs['data']['filename_clean'], 'with batch_size:', configs['data']['batch_size'])
+X_train = np.array([norm_price_variation_train , norm_highs_train, norm_low_train]).transpose()
+#little trick to make X_train a 3 dimensional array for LSTM input shape
+X_train = np.reshape(X_train,(X_train.shape[0],X_train.shape[1],1))
 
-data_gen_train = dl.generate_clean_data(
-    configs['data']['filename_clean'],
-    batch_size=configs['data']['batch_size']
-)
+print(X_train[:2])
 
-with h5py.File(configs['data']['filename_clean'], 'r') as hf:
-    nrows = hf['x'].shape[0]
-    ncols = hf['x'].shape[2]
-    
-ntrain = int(configs['data']['train_test_split'] * nrows)
-steps_per_epoch = int((ntrain / configs['model']['epochs']) / configs['data']['batch_size'])
-print('> Clean data has', nrows, 'data rows. Training on', ntrain, 'rows with', steps_per_epoch, 'steps-per-epoch')
+#We generate Y_train. For this update, we will only determine if the trend is up or down for 2 days ahead
+Y_train = np.array((np.sign((data_train[2:, 3] / data_train[:-2, 3] - 1)) + 1) / 2)
+print(Y_train[:10])
 
-model = lstm.build_network([ncols, 150, 150, 1])
-t = threading.Thread(target=fit_model_threaded, args=[model, data_gen_train, steps_per_epoch, configs])
-t.start()
+#Lets make a simple lstm model
+#I got it from online tutorial
+model = Sequential()
+model.add(LSTM(100,
+               input_shape = (None,1),
+               return_sequences = True
+              ))
+model.add(Dropout(0.1))
+model.add(LSTM(100, return_sequences=True))
+model.add(Dropout(0.1))
+model.add(LSTM(50))
+model.add(Dense(1))
+model.add(Activation('sigmoid'))
 
-data_gen_test = dl.generate_clean_data(
-    configs['data']['filename_clean'],
-    batch_size=configs['data']['batch_size'],
-    start_index=ntrain
-)
+print('Training started')
+model.compile(loss="mse", optimizer="rmsprop")
+model.fit(X_train[:-2],Y_train, batch_size=512,
+	    epochs=500,
+	    validation_split=0.05)
+print('Training finished')
 
-ntest = nrows - ntrain
-steps_test = int(ntest / configs['data']['batch_size'])
-print('> Testing model on', ntest, 'data rows with', steps_test, 'steps')
+norm_price_variation_test = (1 - (data_test[:, 0] / data_test[:, 3])) * 100
+norm_highs_test = (data_test[:, 1] / np.maximum(data_test[:, 0], data_test[:, 3]) - 1) * 100
+norm_low_test = (data_test[:, 2] / np.minimum(data_test[:, 0], data_test[:, 3]) - 1) * 100
 
-predictions = model.predict_generator(
-    generator_strip_xy(data_gen_test, true_values),
-    steps=steps_test
-)
+X_test = np.array([norm_price_variation_test , norm_highs_test, norm_low_test]).transpose()
+X_test = np.reshape(X_test,(X_test.shape[0],X_test.shape[1],1))
+Y_test = np.array((np.sign(data_test[2:, 3] / data_test[:-2, 3] - 1) + 1) / 2)
+print('X_test data shape: {}'.format(X_test.shape))
+print('Y_test data shape: {}'.format(Y_test.shape))
 
-#Save our predictions
-with h5py.File(configs['model']['filename_predictions'], 'w') as hf:
-    dset_p = hf.create_dataset('predictions', data=predictions)
-    dset_y = hf.create_dataset('true_values', data=true_values)
-    
-plot_results(predictions[:800], true_values[:800])
+# model.evaluate(X_test[:-2],Y_test)
 
-#Reload the data-generator
-data_gen_test = dl.generate_clean_data(
-    configs['data']['filename_clean'],
-    batch_size=800,
-    start_index=ntrain
-)
-data_x, true_values = next(data_gen_test)
-window_size = 50 #numer of steps to predict into the future
+pred = model.predict(X_test)
 
-#We are going to cheat a bit here and just take the next 400 steps from the testing generator and predict that data in its whole
-predictions_multiple = predict_sequences_multiple(
-    model,
-    data_x,
-    data_x[0].shape[0],
-    window_size
-)
+predicted = (np.sign(pred-0.45)+1)/2*50
 
-plot_results_multiple(predictions_multiple, true_values, window_size)
+for p in zip(predicted,Y_test):
+    print('Predicted, Y_test {}:'.format(p))
+#lets plot the last predictions in comparison to the actual variations
+plt.plot(predicted[:],'r')#prediction is in red.
+# plt.plot(data_test[:], 'b')#actual in blue.
+plt.plot(Y_test*50,'b')
+plt.show()
