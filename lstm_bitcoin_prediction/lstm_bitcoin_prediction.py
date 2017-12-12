@@ -50,11 +50,12 @@ def build_model(units, activation, loss, optimizer):
                    return_sequences=True))
     model.add(Dropout(0.2))
 
-    model.add(LSTM(units[2]))
+    model.add(LSTM(units[2],
+                   return_sequences=True))
     model.add(Dropout(0.2))
 
-    #model.add(LSTM(units[3]))
-    #model.add(Dropout(0.2))
+    model.add(LSTM(units[3]))
+    model.add(Dropout(0.2))
 
     model.add(Dense(1))
     model.add(Activation(activation))
